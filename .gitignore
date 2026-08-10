@@ -1,0 +1,52 @@
+# WipeBench - default deny. This repo is SOURCE ONLY; every build artefact, driver pack and
+# licensed binary is excluded. An earlier attempt used an allow-list that permitted *.txt and
+# promptly swallowed a vendor licence key, so directories are excluded wholesale here.
+*
+!*/
+
+!*.ps1
+!*.psm1
+!*.sh
+!*.cmd
+!*.bat
+!*.md
+!.gitignore
+!.gitattributes
+
+# --- never, regardless of extension ---
+# BIOS password material: derives an admin password from identifiers printed on the chassis
+bios_clear.sh
+bios_set.sh
+bios_scripts/
+bios_*.sh
+
+# licensed vendor software and its registration details
+**/lsoft/
+KillDisk*
+*.lic
+*.key
+
+# personal provisioning - unattend.xml carries credentials
+CustomJohn/
+unattend.xml
+
+# build artefacts and driver payload
+*.img
+*.wim
+*.iso
+*.zip
+*.cab
+*.msi
+*.exe
+*.run
+*.tar.gz
+Drivers/
+payload/
+winpe/sources/
+catalog/
+
+# editing detritus - git is the history mechanism now
+*.bak
+*.bak-*
+*.old
+*.orig
