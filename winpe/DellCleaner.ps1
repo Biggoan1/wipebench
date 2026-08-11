@@ -54,13 +54,6 @@ function Assert-SafeToDisk0 {
     Write-Host "Safety check passed: USB is Disk $usbDisk, target is Disk 0." -ForegroundColor Green
 }
 
-# NOTE: two helpers were removed from the public source - one deriving a Dell Express
-# Service Code from the service tag, and a SHA-512 wrapper. Together they reconstructed the
-# BIOS admin password from identifiers printed on the outside of the chassis, so publishing
-# them would defeat the password entirely. Neither was called by anything else in this file.
-# BIOS password handling lives in /opt/wipebench/bios_clear.sh and bios_set.sh on the Linux
-# partition, which are not distributed - see README, "BIOS scripts".
-
 # ----------------------------
 # Image classification helpers
 # ----------------------------
@@ -223,6 +216,14 @@ function Add-DellModelDrivers {
     } catch { }
     if ($sku) { Write-Host "System SKU     : $sku" } else { Write-Host "System SKU     : (not reported)" -ForegroundColor DarkGray }
 
+    # Detected up here rather than down in the whitebox fallback, because the match rules
+    # need it too: Panasonic Toughbooks report nothing usable in Win32_ComputerSystem.Model
+    # and are identified by the board, which is why the SCCM driver-apply steps match on it.
+    $board = $null
+    try { $board = (Get-CimInstance -ClassName Win32_BaseBoard).Product } catch { }
+    if ($board) { $board = $board.Trim() }
+    if ($board) { Write-Host "Baseboard      : $board" } else { Write-Host "Baseboard      : (not reported)" -ForegroundColor DarkGray }
+
     $sawAnyIndex = $false
     foreach ($root in $script:SearchRoots) {
         if ($modelDriverPath) { break }
@@ -253,6 +254,45 @@ function Add-DellModelDrivers {
         Write-Host "No sku-index.json under any driver root - falling back to model name." -ForegroundColor DarkGray
     }
 
+    # ---- match rules -------------------------------------------------------------
+    # Both remaining fallbacks are EXACT folder-name matches, which cannot express what the
+    # fleet actually needs. Panasonic Product strings carry affixes (SCCM matches them with
+    # LIKE '%CF33-4%'), and Surface_Pro_7+ is unreachable by name at all because the folder
+    # transform turns '+' into '_'. match-rules.json holds pattern rules, seeded from the
+    # SCCM driver-apply conditions so the two cannot silently diverge - it is declarative on
+    # purpose, so it can be diffed against the task sequence.
+    # Order matters: first match wins, so specific rules precede general ones.
+    if (-not $modelDriverPath) {
+        foreach ($root in $script:SearchRoots) {
+            if ($modelDriverPath) { break }
+            $rulesPath = Join-Path $root "match-rules.json"
+            if (-not (Test-Path $rulesPath)) { continue }
+            $rules = $null
+            try { $rules = (Get-Content $rulesPath -Raw | ConvertFrom-Json).rules }
+            catch { Write-Host "match-rules.json unreadable ($_) - skipping rules." -ForegroundColor Yellow; continue }
+            foreach ($r in @($rules)) {
+                $subject = switch ("$($r.on)") {
+                    'baseboard' { $board }
+                    'model'     { $rawModel }
+                    default     { $null }
+                }
+                if ([string]::IsNullOrWhiteSpace($subject)) { continue }
+                if ($subject -like $r.match) {
+                    $candidate = Join-Path $root $r.folder
+                    if (Test-Path $candidate) {
+                        $modelDriverPath = $candidate
+                        $resolvedBy = "rule [$($r.on) -like '$($r.match)'] -> $($r.folder)"
+                        Write-Host "Match rule hit : $resolvedBy" -ForegroundColor Green
+                        break
+                    }
+                    # A rule pointing at a pack that is not on this stick is worth saying out
+                    # loud - it means the rules and the driver tree have drifted apart.
+                    Write-Host "Rule '$($r.match)' matched but '$($r.folder)' is not present here." -ForegroundColor Yellow
+                }
+            }
+        }
+    }
+
     # Fallback: normalize model name to folder name, e.g. "Precision 5570" -> "Precision_5570"
     $safeModel = $rawModel -replace '[^A-Za-z0-9\-]+', '_'
     if (-not $modelDriverPath) {
@@ -269,7 +309,7 @@ function Add-DellModelDrivers {
     # which resolve above.
     if (-not $modelDriverPath) {
         $placeholders = @('System Product Name', 'To Be Filled By O.E.M.', 'Default string', 'To be filled by O.E.M.', '')
-        try { $board = (Get-CimInstance -ClassName Win32_BaseBoard).Product } catch { $board = $null }
+        # $board was detected earlier, above the match rules - do not re-query it here
         if ($board) {
             $safeBoard = $board.Trim() -replace '[^A-Za-z0-9\-]+', '_'
             $byBoard = $null
@@ -353,13 +393,10 @@ function Handle-Dell {
     if ($partitions) {
         Write-Host "Disk 0 has partitions. Pleaes reboot in to Linux and wipe the disk." -ForegroundColor DarkRed
 
-# NOTE: a block that derived the Dell BIOS admin password from machine-visible
-        # identifiers used to sit here, commented out. It has been REMOVED from the public
-        # source: the inputs are printed on the outside of the chassis, so publishing the
-        # derivation would let anyone with physical access compute the password.
-        # BIOS password handling lives in /opt/wipebench/bios_clear.sh and bios_set.sh on
-        # the Linux partition, which are not distributed - see README "BIOS scripts".
-                exit 0
+        # The Dell BIOS password derivation (service tag -> express service code -> hash
+        # -> substring) is deliberately NOT published. It lives with the Linux-side BIOS
+        # scripts, which this repo excludes; see the lab's private notes for where.
+        exit 0
     }
 
     #

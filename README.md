@@ -170,13 +170,28 @@ Non-Dell vendors have no machine-readable catalog, so each has a scraper:
 `DellCleaner.ps1` resolves in this order:
 
 1. **SystemSKU** via `Drivers\sku-index.json` — exact, and the only reliable route
-2. **WMI model name** normalised to a folder name
-3. **BaseBoard product** — for whiteboxes and **Panasonic**, which report nothing useful in
-   `Win32_ComputerSystem.Model`
+2. **Match rules** via `Drivers\match-rules.json` — pattern matches, for machines whose
+   reported identifiers are not equal to any folder name
+3. **WMI model name** normalised to a folder name
+4. **BaseBoard product** — for whiteboxes, exact match
 
-Folder naming therefore matters: a pack is only found if its folder matches what the machine
-reports. Dell's catalog name is often *not* that string, so `-Action Alias` creates a junction
-so one pack answers to both names.
+Stages 1, 3 and 4 are all *exact* matches, which is why stage 2 exists. Two cases need it:
+
+- **Panasonic Toughbooks** report nothing useful in `Win32_ComputerSystem.Model` and their
+  `Win32_BaseBoard.Product` strings carry affixes, so `CF33-4` never equals the reported value.
+- **`Surface_Pro_7+`** is unreachable by name at all: the folder-name transform replaces `+`
+  with `_`, so the model string can never normalise back to the folder.
+
+`config/match-rules.json` in this repo is the source copy; deploy it beside `sku-index.json`
+in the driver root. Its rules are seeded from the **SCCM driver-apply step conditions**
+(`Product LIKE '%CF33-4%'` and friends) so the stick and the task sequence cannot silently
+diverge — if SCCM's conditions change, change these to match. Rules are evaluated in order and
+first match wins, so specific rules precede general ones (`Surface Pro 10 5G` before
+`Surface Pro 10`; `Surface Pro 7+` before `Surface Pro 7`).
+
+Folder naming still matters for stages 3 and 4: a pack is only found if its folder matches what
+the machine reports. Dell's catalog name is often *not* that string, so `-Action Alias` creates
+a junction so one pack answers to both names.
 
 ---
 

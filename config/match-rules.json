@@ -1,0 +1,32 @@
+{
+  "generated_utc": "2026-08-10T23:10:00Z",
+  "note": "Pattern rules for machines whose reported identifiers do not equal a pack folder name. Seeded from the SCCM driver-apply step conditions, which are the production-proven matching logic. Evaluated IN ORDER, first match wins, AFTER the SystemSKU index and BEFORE the model-name and baseboard fallbacks. 'on' selects the WMI property: model = Win32_ComputerSystem.Model, baseboard = Win32_BaseBoard.Product. 'match' is a PowerShell -like pattern (* and ? are wildcards; + is literal).",
+  "rules": [
+
+    { "on": "baseboard", "match": "*CF33-2*", "folder": "CF33-2",
+      "why": "SCCM: Win32_BaseBoard WHERE Product LIKE '%CF33-2%'. Toughbooks report nothing useful in ComputerSystem.Model, and the Product string carries affixes, so an exact folder match never fires." },
+    { "on": "baseboard", "match": "*CF33-3*", "folder": "CF33-3",
+      "why": "SCCM: Product LIKE '%CF33-3%'" },
+    { "on": "baseboard", "match": "*CF33-4*", "folder": "CF33-4",
+      "why": "SCCM: Product LIKE '%CF33-4%'" },
+    { "on": "baseboard", "match": "FZ55-1",   "folder": "FZ55-1",
+      "why": "SCCM: Product='FZ55-1' - exact, unlike its siblings" },
+    { "on": "baseboard", "match": "FZ55-2*",  "folder": "FZ55-2",
+      "why": "SCCM: Product LIKE 'FZ55-2%'" },
+    { "on": "baseboard", "match": "FZ55-3*",  "folder": "FZ55-3",
+      "why": "SCCM: Product LIKE 'FZ55-3%'" },
+
+    { "on": "model", "match": "*Surface Pro 10*5G*", "folder": "Surface_Pro_10_5G",
+      "why": "MUST precede the general Pro 10 rule below, or the 5G variant resolves to the non-5G pack" },
+    { "on": "model", "match": "*Surface Pro 10*",    "folder": "Surface_Pro_10",
+      "why": "SCCM: Model LIKE '%Surface Pro 10%'" },
+    { "on": "model", "match": "Surface Pro 7+",      "folder": "Surface_Pro_7+",
+      "why": "SCCM: Model LIKE 'Surface Pro 7+'. This pack can NEVER resolve by name: the folder-name transform turns '+' into '_', so Surface_Pro_7+ is unreachable without a rule. Must precede the Pro 7 rule." },
+    { "on": "model", "match": "Surface Pro 7",       "folder": "Surface_Pro_7",
+      "why": "SCCM: Model LIKE 'Surface Pro 7' - exact, so it does not also catch the 7+" },
+    { "on": "model", "match": "*Surface Laptop 7 for Business", "folder": "Surface_Laptop_7",
+      "why": "SCCM: Model LIKE '%Surface Laptop 7 for Business'" },
+    { "on": "model", "match": "*Surface Laptop 5",   "folder": "Surface_Laptop_5",
+      "why": "SCCM: Model LIKE '%Surface Laptop 5'" }
+  ]
+}

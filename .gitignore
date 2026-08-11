@@ -13,6 +13,10 @@
 !.gitignore
 !.gitattributes
 
+# Named single files only - NOT *.json. The driver payload's sku-index.json and the image
+# manifests are build artefacts and must stay out; this one file is hand-maintained source.
+!config/match-rules.json
+
 # --- never, regardless of extension ---
 # BIOS password material: derives an admin password from identifiers printed on the chassis
 bios_clear.sh
