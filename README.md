@@ -190,8 +190,38 @@ first match wins, so specific rules precede general ones (`Surface Pro 10 5G` be
 `Surface Pro 10`; `Surface Pro 7+` before `Surface Pro 7`).
 
 Folder naming still matters for stages 3 and 4: a pack is only found if its folder matches what
-the machine reports. Dell's catalog name is often *not* that string, so `-Action Alias` creates
-a junction so one pack answers to both names.
+the machine reports. Dell's catalog name is often *not* that string — `-Action Alias` handles it.
+
+### Keeping this correct when packs change
+
+Any pack change — download, update, rename, delete — can orphan a rule or leave a pack
+unreachable, so there is one command that checks the whole thing:
+
+```powershell
+.\tools\WipeBenchDrivers.ps1 -Action Rules              # report
+.\tools\WipeBenchDrivers.ps1 -Action Rules -Fix         # remove redundant junctions + dead rules
+.\tools\WipeBenchDrivers.ps1 -Action Rules -DriversRoot T:\Drivers   # same check on a stick
+```
+
+It reports four things: rules pointing at packs that no longer exist; rules **shadowed** by an
+earlier, more general rule (first match wins, so they could never fire); alias **junctions that a
+rule already covers**; and packs reachable by neither a SKU entry nor a rule.
+
+Three design decisions make this survive updates rather than needing a person to remember:
+
+- **`-Action Alias` writes a match rule, not a junction.** A junction is copied out as a *full
+  second copy* of the pack onto every stick — robocopy follows junctions even though
+  `Get-ChildItem -Recurse` does not — which cost 13.9 GiB for two aliases. A rule costs nothing
+  and survives a pack re-download and a stick rebuild. `-UseJunction` still forces the old
+  behaviour if a real second folder is genuinely needed.
+- **`-Action Normalize` refuses to rename a rule-covered folder**, and `-Action Audit` stops
+  flagging one. `Surface_Pro_7+` is *supposed* to keep its `+`; normalising it to
+  `Surface_Pro_7_` would silently break the rule that reaches it.
+- **Rules live in the driver root, not inside a pack**, so re-downloading a pack cannot remove
+  them. Updating a pack keeps the folder name, so its rule keeps working.
+
+The rules are seeded from the SCCM driver-apply conditions, so if SCCM's conditions change,
+change these to match — and re-run `-Action Rules`.
 
 ---
 
