@@ -32,7 +32,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Audit', 'Check', 'Add', 'Normalize', 'Report', 'Catalog', 'Search', 'Download', 'Update', 'Alias', 'Index', 'PEDriver', 'SyncStick')]
+    [ValidateSet('Audit', 'Check', 'Add', 'Normalize', 'Report', 'Catalog', 'Search', 'Download', 'Update', 'Alias', 'Rules', 'Index', 'PEDriver', 'SyncStick')]
     [string]$Action = 'Audit',
     # MASTER repository lives on the BUILD MACHINE, not on a stick: with ~30 sticks to
     # maintain you download each pack once here, and every build copies it out. Point
@@ -54,6 +54,13 @@ param(
     [int]$ImageIndex = 1,
     [switch]$List,
     [switch]$NoBackup,
+    # -Action Alias writes a MATCH RULE by default (costs nothing, survives a pack update
+    # and a stick rebuild). Use -UseJunction only for the rare case that needs a real
+    # second folder on disk: a junction is copied as a FULL SECOND COPY onto every stick,
+    # because robocopy follows junctions even though Get-ChildItem -Recurse does not.
+    [switch]$UseJunction,
+    # -Action Rules: actually remove what the validator flags, rather than only reporting.
+    [switch]$Fix,
     # Remove the Defender exclusion again once the download finishes. Off by default:
     # "make sure it exists" can never destroy anything, whereas removing it blind on a
     # box that hides exclusions can wipe out one somebody set deliberately.
@@ -229,6 +236,51 @@ $DeepInfThreshold = 16
 function ConvertTo-DriverFolderName([string]$modelString) {
     if ([string]::IsNullOrWhiteSpace($modelString)) { return $null }
     return ($modelString.Trim() -replace '[^A-Za-z0-9\-]+', '_')
+}
+
+# ---- match rules -------------------------------------------------------------------
+# <DriversRoot>\match-rules.json maps a REPORTED identifier to a pack folder by PATTERN.
+# It exists because every other resolution stage is an exact folder-name match, which
+# cannot express: Panasonic baseboard strings that carry affixes, or Surface_Pro_7+
+# (the folder-name transform turns "+" into "_", so no model string normalises back).
+# DellCleaner.ps1 consults it after the SKU index and before the name fallbacks.
+function Get-RulesPath { param([string]$Root) Join-Path $Root "match-rules.json" }
+
+# Folders a match rule points at. Their names are DELIBERATE - the rule exists precisely
+# because the name is not what the model transform would produce (Surface_Pro_7+ is the
+# canonical case: "+" is legal in a folder name but the transform turns it into "_").
+# Renaming one silently breaks its rule, so Audit must not flag them and Normalize must
+# not touch them.
+function Get-RuleCoveredFolders {
+    param([string]$Root)
+    $h = @{}
+    $p = Get-RulesPath $Root
+    if (-not (Test-Path $p)) { return $h }
+    try { foreach ($r in @((Get-Content $p -Raw | ConvertFrom-Json).rules)) { if ($r.folder) { $h["$($r.folder)"] = "$($r.match)" } } } catch { }
+    return $h
+}
+
+function Read-MatchRules {
+    param([string]$Root)
+    $p = Get-RulesPath $Root
+    if (-not (Test-Path $p)) {
+        return [pscustomobject]@{
+            generated_utc = (Get-Date).ToUniversalTime().ToString('s') + 'Z'
+            note          = "Pattern rules: reported identifier -> driver pack folder. Evaluated in order, first match wins, AFTER the SystemSKU index and BEFORE the model-name and baseboard fallbacks. 'on' selects the WMI property: model = Win32_ComputerSystem.Model, baseboard = Win32_BaseBoard.Product. 'match' is a PowerShell -like pattern."
+            rules         = @()
+        }
+    }
+    Get-Content $p -Raw | ConvertFrom-Json
+}
+
+function Write-MatchRules {
+    param([string]$Root, $Rules)
+    $p = Get-RulesPath $Root
+    if ((Test-Path $p) -and -not $NoBackup) {
+        Copy-Item $p "$p.bak-$(Get-Date -Format yyyyMMddHHmmss)" -Force
+    }
+    $Rules.generated_utc = (Get-Date).ToUniversalTime().ToString('s') + 'Z'
+    $Rules | ConvertTo-Json -Depth 6 | Set-Content $p -Encoding UTF8
 }
 
 # ---- Dell driver-pack catalog (the DriverAutomationTool mechanism, minus ConfigMgr) ----
@@ -428,10 +480,13 @@ switch ($Action) {
             @{n = 'Usable'; e = { if ($_.Usable) { 'yes' } else { 'EMPTY' } } } -AutoSize
 
         $bad = @($packs | Where-Object { -not $_.Usable })
-        $odd = @($packs | Where-Object { -not $_.IsNormal })
+        $ruleCovered = Get-RuleCoveredFolders $DriversRoot
+        $odd = @($packs | Where-Object { -not $_.IsNormal -and -not $ruleCovered.ContainsKey($_.Folder) })
+        $byRule = @($packs | Where-Object { -not $_.IsNormal -and $ruleCovered.ContainsKey($_.Folder) })
         $deep = @($packs | Where-Object { $_.DeepestInf -gt $DeepInfThreshold })
         if ($bad) { Say "$($bad.Count) folder(s) contain NO .inf files - nothing would be injected: $($bad.Folder -join ', ')" Red }
         if ($odd) { Say "$($odd.Count) folder name(s) don't match the model transform: $($odd.Folder -join ', ')  (run -Action Normalize)" Yellow }
+        if ($byRule) { Say "$($byRule.Count) folder name(s) intentionally differ from the transform and are reached by a match rule - do NOT normalise these: $($byRule.Folder -join ', ')" DarkGray }
         if ($deep) { Say "$($deep.Count) pack(s) nest .inf files deeper than $DeepInfThreshold levels - usually means a duplicated inner tree, worth checking: $($deep.Folder -join ', ')" Yellow }
 
         # ---- alias junctions ----------------------------------------------------------
@@ -528,8 +583,13 @@ switch ($Action) {
     }
 
     'Normalize' {
-        $todo = @($packs | Where-Object { -not $_.IsNormal })
-        if (-not $todo) { Say "Every folder already matches the model transform." Green; break }
+        $ruleCovered = Get-RuleCoveredFolders $DriversRoot
+        $protected = @($packs | Where-Object { -not $_.IsNormal -and $ruleCovered.ContainsKey($_.Folder) })
+        foreach ($p in $protected) {
+            Say "PROTECTED $($p.Folder) - match rule '$($ruleCovered[$p.Folder])' points at this exact name; renaming it would break the rule." Yellow
+        }
+        $todo = @($packs | Where-Object { -not $_.IsNormal -and -not $ruleCovered.ContainsKey($_.Folder) })
+        if (-not $todo) { Say "Every folder already matches the model transform (or is protected by a rule)." Green; break }
         foreach ($p in $todo) {
             $target = Join-Path $DriversRoot $p.Normalized
             if (Test-Path $target) { Say "SKIP $($p.Folder) -> $($p.Normalized) (target exists - merge by hand)" Yellow; continue }
@@ -907,12 +967,152 @@ switch ($Action) {
         $dst = Join-Path $DriversRoot $aliasName
         if ($aliasName -ieq (Split-Path $src -Leaf)) { Say "That alias is the same name as the pack - nothing to do." Yellow; break }
         if (Test-Path $dst) { throw "'$aliasName' already exists - remove it first if you mean to replace it." }
-        Say "alias '$aliasName' -> $(Split-Path $src -Leaf)" Cyan
+        $packName = Split-Path $src -Leaf
+
+        if (-not $UseJunction) {
+            # DEFAULT since 2026-08-10: write a match rule, not a junction. A junction gets
+            # copied out as a full second copy of the pack onto every stick (robocopy follows
+            # junctions), which cost 13.9 GiB for just two aliases. A rule costs nothing, and
+            # unlike a junction it survives a pack re-download and a stick rebuild.
+            $rules = Read-MatchRules $DriversRoot
+            $existing = @($rules.rules | Where-Object { "$($_.match)" -ieq $Model -and "$($_.on)" -eq 'model' })
+            if ($existing.Count) {
+                Say "a rule for '$Model' already exists -> $($existing[0].folder)" Yellow
+                break
+            }
+            Say "rule: model '$Model' -> $packName" Cyan
+            if ($WhatIfOnly) { Say "(WhatIf) would append the rule" Yellow; break }
+            $rules.rules = @($rules.rules) + [pscustomobject]@{
+                on     = 'model'
+                match  = $Model
+                folder = $packName
+                why    = "Alias added $(Get-Date -Format yyyy-MM-dd): a machine reports '$Model' but the pack is named '$packName'."
+            }
+            Write-MatchRules $DriversRoot $rules
+            Say "written to match-rules.json - a machine reporting '$Model' will now find these drivers." Green
+            Say "  (this file ships in the driver root; DellCleaner reads it after the SKU index)" DarkGray
+            break
+        }
+
+        Say "alias '$aliasName' -> $packName  [JUNCTION - costs a full second copy per stick]" Yellow
         if ($WhatIfOnly) { Say "(WhatIf) would create the junction" Yellow; break }
         & cmd.exe /c mklink /J "`"$dst`"" "`"$src`"" | Out-Null
         if (Test-Path $dst) {
             Say "created - a machine reporting '$Model' will now find these drivers." Green
         } else { Say "junction creation failed (needs an elevated session on NTFS)." Red }
+    }
+
+    'Rules' {
+        # The repeatable consistency check between match-rules.json, the driver tree and the
+        # SKU index. Run it after ANY pack change - download, update, rename, delete - because
+        # each of those can silently orphan a rule or leave a pack unreachable.
+        $rules = Read-MatchRules $DriversRoot
+        $ruleList = @($rules.rules)
+        Say "`nmatch-rules.json - $($ruleList.Count) rules, root $DriversRoot" Cyan
+
+        $roots = @($DriversRoot)
+        $custom = Join-Path (Split-Path $DriversRoot -Parent) "CustomJohn\Drivers"
+        if (Test-Path $custom) { $roots += $custom }
+
+        # 1. every rule must point at a pack that exists
+        Say "`n[1] rule targets" Cyan
+        $dead = @()
+        foreach ($r in $ruleList) {
+            $hit = $null
+            foreach ($root in $roots) { $c = Join-Path $root $r.folder; if (Test-Path $c) { $hit = $c; break } }
+            if ($hit) {
+                $n = (Get-ChildItem $hit -Recurse -Filter *.inf -File -Force -ErrorAction SilentlyContinue).Count
+                Say ("  ok      {0,-9} {1,-32} -> {2} ({3} INFs)" -f $r.on, $r.match, $r.folder, $n) Green
+            } else {
+                $dead += $r
+                Say ("  DEAD    {0,-9} {1,-32} -> {2} (pack not present)" -f $r.on, $r.match, $r.folder) Red
+            }
+        }
+
+        # 2. ordering: a general rule placed before a specific one silently shadows it
+        Say "`n[2] shadowing (first match wins, so specific must precede general)" Cyan
+        $shadow = 0
+        for ($i = 0; $i -lt $ruleList.Count; $i++) {
+            for ($k = $i + 1; $k -lt $ruleList.Count; $k++) {
+                if ("$($ruleList[$i].on)" -ne "$($ruleList[$k].on)") { continue }
+                # does the earlier pattern swallow the later one's literal text?
+                $laterLiteral = "$($ruleList[$k].match)" -replace '\*', ''
+                if ($laterLiteral -and ($laterLiteral -like $ruleList[$i].match) -and $ruleList[$i].folder -ne $ruleList[$k].folder) {
+                    Say ("  SHADOWED '{0}' (#{1}) can never fire - '{2}' (#{3}) matches it first" -f $ruleList[$k].match, ($k+1), $ruleList[$i].match, ($i+1)) Red
+                    $shadow++
+                }
+            }
+        }
+        if (-not $shadow) { Say "  none" Green }
+
+        # 3. junctions that a rule already covers = pure duplication on every stick
+        Say "`n[3] alias junctions that a rule makes redundant" Cyan
+        $redundant = @()
+        foreach ($root in $roots) {
+            foreach ($d in (Get-ChildItem $root -Directory -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })) {
+                $tgt = $null
+                try { $tgt = Split-Path ([string]@($d.Target)[0]) -Leaf } catch { }
+                $bytes = (Get-ChildItem $d.FullName -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+                $covered = @($ruleList | Where-Object { $_.folder -eq $tgt })
+                if ($covered.Count) {
+                    $redundant += $d
+                    Say ("  REDUNDANT {0} -> {1}  ({2:N2} GiB per stick; rule '{3}' already covers it)" -f $d.Name, $tgt, ($bytes/1GB), $covered[0].match) Yellow
+                } else {
+                    Say ("  keep      {0} -> {1}  ({2:N2} GiB per stick; no rule covers it)" -f $d.Name, $tgt, ($bytes/1GB)) DarkGray
+                }
+            }
+        }
+        if (-not $redundant.Count) { Say "  no redundant junctions" Green }
+
+        # 4. packs reachable by nothing at all
+        Say "`n[4] packs on no resolution path" Cyan
+        $skuFolders = @{}
+        $ixp = Join-Path $DriversRoot "sku-index.json"
+        if (Test-Path $ixp) {
+            try {
+                $ix = Get-Content $ixp -Raw | ConvertFrom-Json
+                foreach ($e in @($ix.skus.PSObject.Properties)) { $skuFolders["$($e.Value.folder)"] = $true }
+            } catch { Say "  sku-index.json unreadable" Yellow }
+        }
+        $ruleFolders = @{}; foreach ($r in $ruleList) { $ruleFolders[$r.folder] = $true }
+        $orphans = @()
+        foreach ($root in $roots) {
+            foreach ($d in (Get-ChildItem $root -Directory -Force | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })) {
+                if ($d.Name -eq '.wipebench') { continue }
+                if ($skuFolders.ContainsKey($d.Name) -or $ruleFolders.ContainsKey($d.Name)) { continue }
+                $orphans += $d.Name
+            }
+        }
+        if ($orphans.Count) {
+            Say "  $($orphans.Count) pack(s) reachable ONLY if the reported model name equals the folder exactly:" Yellow
+            foreach ($o in $orphans) { Say "    $o" Yellow }
+            Say "  that is fine for a normal Dell name; add a rule if the machine reports anything else." DarkGray
+        } else { Say "  none" Green }
+
+        # 5. act
+        if ($Fix -and ($dead.Count -or $redundant.Count)) {
+            Say "`n[fix]" Cyan
+            foreach ($d in $redundant) {
+                if ($WhatIfOnly) { Say "  (WhatIf) would remove junction $($d.Name)" Yellow; continue }
+                # rmdir WITHOUT /s: removes the link, never the target's contents
+                & cmd.exe /c rmdir "`"$($d.FullName)`"" 2>&1 | Out-Null
+                Say "  removed redundant junction $($d.Name) $(if (Test-Path $d.FullName) { '- FAILED' } else { '' })" Green
+            }
+            if ($dead.Count) {
+                if ($WhatIfOnly) { Say "  (WhatIf) would drop $($dead.Count) dead rule(s)" Yellow }
+                else {
+                    $keep = @($ruleList | Where-Object { $dead -notcontains $_ })
+                    $rules.rules = $keep
+                    Write-MatchRules $DriversRoot $rules
+                    Say "  dropped $($dead.Count) dead rule(s); $($keep.Count) remain" Green
+                }
+            }
+        } elseif ($dead.Count -or $redundant.Count -or $shadow) {
+            Say "`nre-run with -Fix to remove redundant junctions and dead rules." Yellow
+        }
+
+        $problems = $dead.Count + $shadow
+        Say "`n$(if ($problems) { "$problems problem(s) need attention" } else { 'rules are consistent with the driver tree' })" $(if ($problems) { 'Red' } else { 'Green' })
     }
 
     'Index' {
