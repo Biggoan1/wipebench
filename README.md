@@ -234,6 +234,24 @@ technique, KillDisk method number, NIST 800-88 class, result.
 The CSV **accumulates on the stick**, so collecting it periodically is part of the workflow —
 otherwise the only copy of the record travels around in a bag.
 
+### What must never be published
+
+The Dell BIOS password derivation and the Linux-side BIOS scripts stay in the lab. `.gitignore`
+excludes the scripts, but exclusion alone was not enough: the derivation was scrubbed from
+`winpe/DellCleaner.ps1` before the first publish and then reintroduced when the live copy of that
+file was pasted over the scrubbed one — it reached a public repo before anyone noticed.
+
+So it is enforced rather than remembered:
+
+```sh
+sh tools/check-no-secrets.sh                                          # run it any time
+ln -sf ../../tools/check-no-secrets.sh .git/hooks/pre-commit          # or block commits outright
+```
+
+It greps the **index** for the derivation's identifiers and refuses the commit. Hooks are not
+cloned, so install it after cloning. If you sync a file in from a working machine, re-run the
+check — that is exactly the path that regressed last time.
+
 **The transcript deliberately does not contain the Dell BIOS password.** `auto_wipe.sh` tees all
 stdout to the transcript, and the transcript is archived, so anything printed during the BIOS step
 would be retained in cleartext for every machine ever wiped. The BIOS scripts therefore compute
