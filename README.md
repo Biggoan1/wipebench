@@ -234,6 +234,12 @@ technique, KillDisk method number, NIST 800-88 class, result.
 The CSV **accumulates on the stick**, so collecting it periodically is part of the workflow —
 otherwise the only copy of the record travels around in a bag.
 
+**The transcript deliberately does not contain the Dell BIOS password.** `auto_wipe.sh` tees all
+stdout to the transcript, and the transcript is archived, so anything printed during the BIOS step
+would be retained in cleartext for every machine ever wiped. The BIOS scripts therefore compute
+the password and hand it straight to `cctk` without displaying it. If you add output to that step,
+keep it off stdout.
+
 ### Sanitisation methods
 
 | Path | Technique | NIST SP 800-88 |
