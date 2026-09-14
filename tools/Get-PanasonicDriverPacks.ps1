@@ -154,7 +154,7 @@ foreach ($want in $Models) {
             if ($have) { Say "  Enterprise CABs it DOES offer: $($have -join '; ')" Gray }
             else       { Say "  it offers no Enterprise CAB at all (One-Click Bundle only)" Gray }
             # NOT the same as "never" - these models are still in production, so a Win11 pack
-            # may appear later, and STAGING can take delivery of them whatever today's fleet
+            # may appear later, and the bench can take delivery of them whatever today's fleet
             # export shows. Re-check periodically rather than writing them off.
             Say "  Still in production, so re-run this periodically rather than assuming never." Gray
         }

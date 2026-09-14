@@ -353,7 +353,7 @@ New-Item  $P3Root\WIPEBENCH_USB.lock -ItemType File -Force | Out-Null
 Write-Host "USB created successfully."
 
 <#
-    robocopy C:\Temp\STAGINGdrivers T:\Drivers *.* `
+    robocopy C:\Temp\STAGING\drivers T:\Drivers *.* `
       /E /COPY:DAT /DCOPY:DAT /R:4 /W:1 /NP /MT:16 /XJ /NFL /ETA  
 
 #>
