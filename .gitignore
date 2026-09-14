@@ -54,3 +54,23 @@ catalog/
 *.bak-*
 *.old
 *.orig
+
+# --- the build workstation's working folder holds more than the source (added 2026-09-14) ---
+# C:\WipeBench-source on the build box is now a checkout of this repo, and it also holds the
+# pre-git archive: stale Linux script copies, the old WinPE boot tree, catalog downloads, and
+# root-level DellCleaner variants that still carry the BIOS derivation. None of it is source.
+# The allow-list above admits any *.ps1 / *.sh anywhere, so these must be shut explicitly.
+/Scripts/
+/legacy-Boots/
+/winpe-startup/
+/catalog/
+/*.ps1
+*.live.ps1
+*.patched.ps1
+*.sad
+capture.err
+Key.txt
+Disk.txt
+err.txt
+# point-in-time exports of customer hardware, never source
+fleet-needed-*.txt
