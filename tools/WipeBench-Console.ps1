@@ -39,6 +39,17 @@ if ([string]::IsNullOrWhiteSpace($ToolDir)) {
 if ([string]::IsNullOrWhiteSpace($ImageRoot))   { $ImageRoot = "C:\WipeBenchImages" }
 if ([string]::IsNullOrWhiteSpace($DriversRoot)) { $DriversRoot = "C:\WipeBenchImages\payload\Drivers" }
 
+# Running from a stick's Tools\ folder (the build copies the tools there): unless the caller
+# named a -DriversRoot, work on THAT stick's Drivers\, not on a build-machine path that
+# does not exist on a bench PC. The lock file beside Tools\ is how a WipeBench partition
+# identifies itself.
+if (-not $PSBoundParameters.ContainsKey('DriversRoot')) {
+    $stickRoot = Split-Path $ToolDir -Parent
+    if ($stickRoot -and (Test-Path (Join-Path $stickRoot 'WIPEBENCH_USB.lock')) -and (Test-Path (Join-Path $stickRoot 'Drivers'))) {
+        $DriversRoot = Join-Path $stickRoot 'Drivers'
+    }
+}
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()

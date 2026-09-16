@@ -245,13 +245,17 @@ function Write-StickManifest {
 Step 3 "Copying WinPE / boot files"
 $peDir = Join-Path $ImageRoot $mf.winpe_dir
 if ($mf.winpe_dir -and (Test-Path $peDir)) {
-    robocopy $peDir "${peLetter}:\" /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+    # Editing detritus never belongs on the boot partition: it is 2 GB, and a single stale
+    # boot.wim backup left beside the live one is enough to fill it and abort the copy.
+    robocopy $peDir "${peLetter}:\" /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP `
+        /XD '$RECYCLE.BIN' 'System Volume Information' `
+        /XF '*.bak' '*.bak-*' '*.sad' '*.old' '*.orig' 'err.txt' | Out-Null
     Say "  $((Get-ChildItem "${peLetter}:\" -Recurse -File | Measure-Object).Count) files copied" Green
 } else { Say "  no winpe\ in the image set - skipped" Yellow }
 Write-StickManifest -Root "${peLetter}:\" -Partition "winpe"
 
 # ---------- 4. payload ----------
-Step 4 "Copying payload (install.wim, Drivers, STAGING)"
+Step 4 "Copying payload (install.wim, Drivers)"
 $payDir = Join-Path $ImageRoot $mf.payload_dir
 if (-not $SkipPayload -and $mf.payload_dir -and (Test-Path $payDir)) {
     # -SkipDrivers: everything except the 140GB Drivers tree. The stick still boots and
@@ -277,6 +281,24 @@ if (-not $SkipPayload -and $mf.payload_dir -and (Test-Path $payDir)) {
 }
 Write-StickManifest -Root "${payLetter}:\" -Partition "payload"
 Say "  stamped WIPEBENCH_USB.lock with a build manifest (date, packs, catalog, tool age)" Gray
+
+# ---------- 4b. tools ----------
+# The console and the driver tooling ride on the stick, so a tech at any Windows machine can
+# open Tools\Start-WipeBenchConsole.cmd and download or audit driver packs straight into the
+# stick's own Drivers\ - no build workstation needed. Copied from THIS checkout, not from the
+# image set, so the stick always carries the tools that built it.
+Step "4b" "Copying WipeBench tools"
+if (-not $SkipPayload) {
+    $toolsDst = "${payLetter}:\Tools"
+    New-Item -ItemType Directory -Path $toolsDst -Force | Out-Null
+    Get-ChildItem $PSScriptRoot -File | Where-Object { $_.Extension -in '.ps1', '.cmd', '.sh' } |
+        Copy-Item -Destination $toolsDst -Force
+    foreach ($doc in 'WipeBench-Operator-Guide.md', 'README.md') {
+        $src = Join-Path (Split-Path $PSScriptRoot -Parent) $doc
+        if (Test-Path $src) { Copy-Item $src $toolsDst -Force }
+    }
+    Say "  $((Get-ChildItem $toolsDst -File).Count) files -> $toolsDst (open Start-WipeBenchConsole.cmd)" Green
+} else { Say "  -SkipPayload: tools not copied" Yellow }
 
 # ---------- 5. verify ----------
 Step 5 "Verification"

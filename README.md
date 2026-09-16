@@ -22,7 +22,7 @@ A built stick is GPT with three partitions:
 > files, so they are not in this repository. Service them with
 > `WipeBenchDrivers.ps1 -Action PEDriver` or by mounting the WIM with DISM.
 | 2 | ext4 | 8 GB | *(raw)* | Debian 13 + GRUB. **The wipe engine lives here** |
-| 3 | NTFS | rest | `WIPEBENCHNTFS` | `sources\install.wim`, `Drivers\`, `Evidence\` |
+| 3 | NTFS | rest | `WIPEBENCHNTFS` | `sources\install.wim`, `Drivers\`, `Evidence\`, `Tools\` (this repo's `tools\` + the operator guide - open `Tools\Start-WipeBenchConsole.cmd` on any Windows PC to download or audit driver packs into the stick's own `Drivers\`) |
 
 GRUB chainloads WinPE by the FAT32 **volume serial**, so a rebuild restores that serial rather
 than letting Windows generate a fresh one — otherwise the boot entry stops resolving.
