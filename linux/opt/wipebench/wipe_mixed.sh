@@ -34,6 +34,7 @@ SE_PASS="${SE_PASS:-WipeBench}"                                 # temporary user
 SE_MAX_MIN="${SE_MAX_MIN:-120}"                                 # skip the firmware erase if the drive estimates longer than this
 SE_LOG_DIR="${SE_LOG_DIR:-/tmp/wipebench-ata}"                  # per-drive hdparm transcript; auto_wipe.sh copies these to Evidence/
 POLL_INTERVAL="${POLL_INTERVAL:-10}"                            # seconds between sanitize-log polls
+TICK_SEC="${TICK_SEC:-30}"                                      # on-screen progress line per running erase, every N seconds
 TIMEOUT_SEC="${TIMEOUT_SEC:-7200}"                              # 2 hours
 RUN=0
 YES=0
@@ -287,6 +288,13 @@ poll_sanitize() {
         echo "Sanitize completed on $dev"
         return 0
       fi
+      # progress line for the bench: SPROG is a fraction of 65536
+      if (( t % TICK_SEC == 0 )); then
+        local sprog pct=""
+        sprog=$(printf '%s\n' "$out" | grep -iE 'Sanitize Progress' | grep -oE '[0-9]+\s*$' | head -1 || true)
+        [[ -n "$sprog" ]] && pct=" $(( sprog * 100 / 65536 ))%"
+        printf '[%s] %-8s nvme sanitize running%s, %d min elapsed\n' "$(date +%H:%M:%S)" "${dev#/dev/}" "$pct" "$(( t / 60 ))"
+      fi
     fi
     sleep "$POLL_INTERVAL"
     t=$((t + POLL_INTERVAL))
@@ -431,7 +439,9 @@ erase_hdd_nwipe() {
       --method="$NWIPE_METHOD" --verify="$NWIPE_VERIFY" \
       --logfile="$NWIPE_REPORT_DIR/nwipe-$d.log" --PDFreportpath="$NWIPE_REPORT_DIR" "/dev/$d" &
     pids["$d"]=$!
+    TICK_PIDS["$d"]=$!; TICK_LOG["$d"]="$NWIPE_REPORT_DIR/nwipe-$d.log"
   done
+  local nw_ticker=""; progress_ticker nwipe & nw_ticker=$!
   for d in "${ALL_HDD[@]}"; do
     rc=0; wait "${pids[$d]}" || rc=$?
     if (( rc == 0 )); then
@@ -443,8 +453,42 @@ erase_hdd_nwipe() {
       worst=$rc
     fi
   done
+  ticker_stop "$nw_ticker"; TICK_PIDS=(); TICK_LOG=()
   (( worst == 0 )) || exit "$worst"
 }
+
+# ---- progress ticker -----------------------------------------------------------------
+# Runs in the background while a batch of erases is in flight and prints one line per drive
+# every TICK_SEC so a tech at the bench can see it has not hung. Reads the caller's TICK_*
+# arrays (populated before the fork). nwipe --nogui logs its current stats on SIGUSR1, so we
+# poke it and relay whatever it appended to its log - format-agnostic on purpose. Firmware
+# erases (hdparm) report nothing, so those get elapsed time against the drive's own estimate.
+declare -A TICK_PIDS=() TICK_LOG=() TICK_EST=()
+progress_ticker() {
+  local kind="$1" start=$SECONDS alive d pid log before stat el
+  while :; do
+    sleep "$TICK_SEC"
+    alive=0
+    for d in "${!TICK_PIDS[@]}"; do
+      pid=${TICK_PIDS[$d]}
+      kill -0 "$pid" 2>/dev/null || continue
+      alive=1; el=$(( SECONDS - start ))
+      if [[ "$kind" == "nwipe" ]]; then
+        log=${TICK_LOG[$d]}
+        before=$(wc -l < "$log" 2>/dev/null || echo 0)
+        kill -USR1 "$pid" 2>/dev/null || true
+        sleep 1
+        stat=$(tail -n +"$(( before + 1 ))" "$log" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1 | sed -E 's/^\[[^]]*\][[:space:]]*//; s/^[a-z]+:[[:space:]]*//' || true)
+        printf '[%s] %-8s %s\n' "$(date +%H:%M:%S)" "$d" "${stat:-nwipe running, $(( el / 60 )) min elapsed}"
+      else
+        printf '[%s] %-8s ATA Secure Erase running, %d min elapsed (drive estimated %s min)\n' \
+          "$(date +%H:%M:%S)" "$d" "$(( el / 60 ))" "${TICK_EST[$d]:-?}"
+      fi
+    done
+    (( alive )) || break
+  done
+}
+ticker_stop() { [[ -n "${1:-}" ]] || return 0; kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # ---- ATA Secure Erase -----------------------------------------------------------------
 # One hdparm session per eligible drive, all started together. The erase needs a user
@@ -485,10 +529,12 @@ if [[ "$SATA_METHOD" != "overwrite" && ${#SATA_LIKE[@]} -gt 0 ]]; then
       echo "ATA Secure Erase ($cap) starting on /dev/$d ..."
       ( ata_secure_erase_one "$d" "$cap" ) &
       se_pids["$d"]=$!; se_mode["$d"]=$cap
+      TICK_PIDS["$d"]=$!; TICK_EST["$d"]="${SE_PLAN[$d]##* }"
     elif [[ "$SATA_METHOD" == "secure-erase" ]]; then
       echo "ATA Secure Erase requested but /dev/$d is '$cap' - falling back to the $HDD_BACKEND overwrite"
     fi
   done
+  se_ticker=""; (( ${#TICK_PIDS[@]} )) && { progress_ticker ata & se_ticker=$!; }
   for d in "${!se_pids[@]}"; do
     rc=0; wait "${se_pids[$d]}" || rc=$?
     if (( rc == 0 )); then
@@ -500,6 +546,7 @@ if [[ "$SATA_METHOD" != "overwrite" && ${#SATA_LIKE[@]} -gt 0 ]]; then
       wbev "$d" "ATA Secure Erase (${se_mode[$d]}, hdparm)" "-" "NIST 800-88 Purge" "FAILED(rc=$rc)->overwrite"
     fi
   done
+  ticker_stop "${se_ticker:-}"; TICK_PIDS=(); TICK_EST=()
 fi
 
 # Everything the firmware did not erase goes to the overwrite backend
