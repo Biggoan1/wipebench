@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# wipe_mixed.sh — Secure erase NVMe via nvme-cli sanitize/format and HDD/SATA via an
-# overwrite backend: KillDisk (the licensed tool on CE sticks) or nwipe (GPL, on the
-# "outside" image). The backend is chosen at run time from what is installed.
+# wipe_mixed.sh — Secure erase. NVMe via nvme-cli sanitize/format; SATA/ATA via the drive's
+# own firmware (ATA Secure Erase through hdparm) where it is supported, fast and not frozen;
+# everything else via an overwrite backend: KillDisk (the licensed tool on CE sticks) or
+# nwipe (GPL, on the "outside" image). The overwrite backend is chosen at run time from what
+# is installed. Firmware erases are recorded as NIST 800-88 Purge, overwrites as Clear.
 # Destroys data. Use only in an isolated lab environment.
 
 set -euo pipefail
@@ -23,6 +25,14 @@ NWIPE_BIN="${NWIPE_BIN:-nwipe}"
 NWIPE_METHOD="${NWIPE_METHOD:-zero}"                            # one-pass zeros = NIST 800-88 Clear
 NWIPE_VERIFY="${NWIPE_VERIFY:-last}"                            # off|last|all
 NWIPE_REPORT_DIR="${NWIPE_REPORT_DIR:-/tmp/wipebench-nwipe}"    # per-drive log + PDF certificate; auto_wipe.sh copies these to Evidence/
+# ATA Secure Erase (hdparm) for SATA drives. auto = try it first on drives that report the
+# feature, are not frozen/locked/password-enabled, and estimate the job within SE_MAX_MIN;
+# anything else goes to the overwrite backend. A spinner's firmware erase is the same full
+# overwrite done one drive at a time, so the cap keeps big HDDs on the parallel backend.
+SATA_METHOD="${SATA_METHOD:-auto}"                              # auto|secure-erase|overwrite
+SE_PASS="${SE_PASS:-WipeBench}"                                 # temporary user password the erase needs; cleared by the erase itself
+SE_MAX_MIN="${SE_MAX_MIN:-120}"                                 # skip the firmware erase if the drive estimates longer than this
+SE_LOG_DIR="${SE_LOG_DIR:-/tmp/wipebench-ata}"                  # per-drive hdparm transcript; auto_wipe.sh copies these to Evidence/
 POLL_INTERVAL="${POLL_INTERVAL:-10}"                            # seconds between sanitize-log polls
 TIMEOUT_SEC="${TIMEOUT_SEC:-7200}"                              # 2 hours
 RUN=0
@@ -34,7 +44,7 @@ DEBUG=0
 usage() {
   cat <<EOF
 Usage: sudo $0 [--run] [--yes] [--include-root] [--exclude-usb|--include-usb]
-               [--nvme-method auto|crypto|block|format]
+               [--nvme-method auto|crypto|block|format] [--sata-method auto|secure-erase|overwrite]
                [--hdd-backend auto|killdisk|nwipe]
                [--killdisk-bin /path/KillDisk] [--killdisk-method N]
                [--nwipe-method zero|one|random|dodshort|dod|gutmann] [--nwipe-verify off|last|all] [--debug]
@@ -50,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --exclude-usb) EXCLUDE_USB=1; shift;;
     --include-usb) EXCLUDE_USB=0; shift;;
     --nvme-method) NVME_METHOD="$2"; shift 2;;
+    --sata-method) SATA_METHOD="$2"; shift 2;;
     --killdisk-bin) KILLDISK_BIN="$2"; shift 2;;
     --killdisk-method) KILLDISK_METHOD="$2"; shift 2;;
     --hdd-backend) HDD_BACKEND="$2"; shift 2;;
@@ -80,6 +91,12 @@ case "$HDD_BACKEND" in
   nwipe)    command -v "$NWIPE_BIN" >/dev/null 2>&1 || { echo "nwipe not found ('$NWIPE_BIN')." >&2; exit 1; };;
   *) echo "Unknown --hdd-backend '$HDD_BACKEND' (auto|killdisk|nwipe)" >&2; exit 1;;
 esac
+
+case "$SATA_METHOD" in auto|secure-erase|overwrite) ;; *) echo "Unknown --sata-method '$SATA_METHOD'" >&2; exit 1;; esac
+if [[ "$SATA_METHOD" != "overwrite" ]] && ! command -v hdparm >/dev/null 2>&1; then
+  echo "WARNING: hdparm not found — ATA Secure Erase unavailable, SATA drives go to the $HDD_BACKEND overwrite"
+  SATA_METHOD="overwrite"
+fi
 
 # nvme-cli is optional — warn but continue (those devices go to the HDD backend instead)
 if ! command -v nvme >/dev/null 2>&1; then
@@ -177,6 +194,39 @@ if (( DEBUG )); then
   echo "DEBUG: NVME_NAMESPACES = ${NVME_NAMESPACES[*]}"
 fi
 
+# ---- ATA Secure Erase capability (read-only probe, safe in dry-run) ----------------------
+# Prints one word: enhanced|normal (usable), or the reason it is not: frozen|locked|enabled|
+# slow|unsupported|notata|nothdparm. Second word = the drive's own minute estimate when known.
+ata_se_capability() {
+  local dev="$1" info sec tran est mode
+  tran=$(lsblk -dno TRAN "/dev/$dev" 2>/dev/null | xargs || true)
+  [[ "$tran" == "sata" || "$tran" == "ata" ]] || { echo notata; return; }
+  info=$(hdparm -I "/dev/$dev" 2>/dev/null) || { echo notata; return; }
+  sec=$(printf '%s\n' "$info" | sed -n '/^Security:/,/^[^[:space:]]/p')
+  printf '%s\n' "$sec" | grep -qE '^[[:space:]]+supported[[:space:]]*$' || { echo unsupported; return; }
+  printf '%s\n' "$sec" | grep -qE '^[[:space:]]+frozen'  && { echo frozen;  return; }
+  printf '%s\n' "$sec" | grep -qE '^[[:space:]]+locked'  && { echo locked;  return; }
+  printf '%s\n' "$sec" | grep -qE '^[[:space:]]+enabled' && { echo enabled; return; }
+  if printf '%s\n' "$sec" | grep -q 'supported: enhanced erase'; then
+    mode=enhanced
+    est=$(printf '%s\n' "$sec" | grep -oE '(more than )?[0-9]+min for ENHANCED SECURITY ERASE UNIT' | head -1)
+  else
+    mode=normal
+    est=$(printf '%s\n' "$sec" | grep -oE '(more than )?[0-9]+min for SECURITY ERASE UNIT' | head -1)
+  fi
+  local mins; mins=$(printf '%s' "$est" | grep -oE '[0-9]+' | head -1 || true)
+  if [[ -n "$mins" ]]; then
+    # "more than Nmin" is the ATA spec's way of saying "off the scale" - treat as too slow
+    if [[ "$est" == more\ than* || "$mins" -gt "$SE_MAX_MIN" ]]; then echo "slow $mins"; return; fi
+  fi
+  echo "$mode ${mins:-?}"
+}
+
+declare -A SE_PLAN=()     # dev -> capability word(s), filled for the plan and reused for the run
+if [[ "$SATA_METHOD" != "overwrite" ]]; then
+  for d in ${SATA_LIKE[@]+"${SATA_LIKE[@]}"}; do SE_PLAN["$d"]=$(ata_se_capability "$d"); done
+fi
+
 suffix=""
 [[ "$EXCLUDE_USB" -eq 1 ]] && suffix="(+USB)"
 
@@ -190,7 +240,16 @@ fi
 echo "Plan (dry-run=$((1-RUN))):"
 echo "- Excluded disks: $excluded_disks $suffix"
 echo "- NVMe controllers to sanitize (from detection): ${NVME_NAMESPACES[*]}"
-echo "- Non-NVMe disks for the $HDD_BACKEND overwrite: ${SATA_LIKE[*]:-none}"
+if [[ "$SATA_METHOD" != "overwrite" && ${#SATA_LIKE[@]} -gt 0 ]]; then
+  for d in "${SATA_LIKE[@]}"; do
+    case "${SE_PLAN[$d]%% *}" in
+      enhanced|normal) echo "- /dev/$d: ATA Secure Erase (${SE_PLAN[$d]%% *}, drive estimates ${SE_PLAN[$d]##* } min) then $HDD_BACKEND only if it fails";;
+      *)               echo "- /dev/$d: $HDD_BACKEND overwrite (secure erase not used: ${SE_PLAN[$d]})";;
+    esac
+  done
+else
+  echo "- Non-NVMe disks for the $HDD_BACKEND overwrite: ${SATA_LIKE[*]:-none}"
+fi
 case "$HDD_BACKEND" in
   killdisk) echo "- NVMe method: $NVME_METHOD; KillDisk method: $KILLDISK_METHOD ($NIST_METHOD=NIST 800-88 Rev 1, 3=DoD 5220.22-M)"
             echo "- NVMe drives that fail sanitize fall back to KillDisk method $NIST_METHOD";;
@@ -387,7 +446,68 @@ erase_hdd_nwipe() {
   (( worst == 0 )) || exit "$worst"
 }
 
-ALL_HDD=(${SATA_LIKE[@]+"${SATA_LIKE[@]}"} ${HDD_FALLBACK[@]+"${HDD_FALLBACK[@]}"})
+# ---- ATA Secure Erase -----------------------------------------------------------------
+# One hdparm session per eligible drive, all started together. The erase needs a user
+# password set first; a completed erase clears it. EVERY failure path removes the temporary
+# password again so a drive can never be left locked, then the drive goes to the overwrite.
+ata_secure_erase_one() {
+  local dev="$1" mode="$2" flag=--security-erase rc=0
+  [[ "$mode" == "enhanced" ]] && flag=--security-erase-enhanced
+  {
+    echo "== $(date -u +%FT%TZ) ATA Secure Erase ($mode) on /dev/$dev"
+    hdparm -I "/dev/$dev" | sed -n '/^Security:/,/^[^[:space:]]/p'
+    if ! hdparm --yes-i-know-what-i-am-doing --user-master u --security-set-pass "$SE_PASS" "/dev/$dev"; then
+      echo "could not set the temporary password"; exit 2
+    fi
+    if timeout "$(( SE_MAX_MIN * 60 + 600 ))" hdparm --yes-i-know-what-i-am-doing --user-master u "$flag" "$SE_PASS" "/dev/$dev"; then
+      if hdparm -I "/dev/$dev" 2>/dev/null | grep -qE '^[[:space:]]+not[[:space:]]+enabled'; then
+        echo "== $(date -u +%FT%TZ) erase complete; security back to 'not enabled'"; exit 0
+      fi
+      echo "erase returned but security is still enabled - clearing the password"
+      hdparm --yes-i-know-what-i-am-doing --user-master u --security-disable "$SE_PASS" "/dev/$dev" || true
+      exit 3
+    else
+      rc=$?
+      echo "erase FAILED (rc=$rc) - clearing the temporary password"
+      hdparm --yes-i-know-what-i-am-doing --user-master u --security-disable "$SE_PASS" "/dev/$dev" || true
+      exit 4
+    fi
+  } >"$SE_LOG_DIR/ata-$dev.log" 2>&1
+}
+
+SE_DONE=()
+if [[ "$SATA_METHOD" != "overwrite" && ${#SATA_LIKE[@]} -gt 0 ]]; then
+  mkdir -p "$SE_LOG_DIR"
+  declare -A se_pids=() se_mode=()
+  for d in "${SATA_LIKE[@]}"; do
+    cap="${SE_PLAN[$d]%% *}"
+    if [[ "$cap" == "enhanced" || "$cap" == "normal" ]]; then
+      echo "ATA Secure Erase ($cap) starting on /dev/$d ..."
+      ( ata_secure_erase_one "$d" "$cap" ) &
+      se_pids["$d"]=$!; se_mode["$d"]=$cap
+    elif [[ "$SATA_METHOD" == "secure-erase" ]]; then
+      echo "ATA Secure Erase requested but /dev/$d is '$cap' - falling back to the $HDD_BACKEND overwrite"
+    fi
+  done
+  for d in "${!se_pids[@]}"; do
+    rc=0; wait "${se_pids[$d]}" || rc=$?
+    if (( rc == 0 )); then
+      echo "ATA Secure Erase completed on /dev/$d"
+      wbev "$d" "ATA Secure Erase (${se_mode[$d]}, hdparm)" "-" "NIST 800-88 Purge" "success"
+      SE_DONE+=("$d")
+    else
+      echo "ATA Secure Erase FAILED on /dev/$d (rc=$rc, see $SE_LOG_DIR/ata-$d.log) - falling back to the $HDD_BACKEND overwrite"
+      wbev "$d" "ATA Secure Erase (${se_mode[$d]}, hdparm)" "-" "NIST 800-88 Purge" "FAILED(rc=$rc)->overwrite"
+    fi
+  done
+fi
+
+# Everything the firmware did not erase goes to the overwrite backend
+SATA_REMAINING=()
+for d in ${SATA_LIKE[@]+"${SATA_LIKE[@]}"}; do
+  [[ " ${SE_DONE[*]:-} " == *" $d "* ]] || SATA_REMAINING+=("$d")
+done
+ALL_HDD=(${SATA_REMAINING[@]+"${SATA_REMAINING[@]}"} ${HDD_FALLBACK[@]+"${HDD_FALLBACK[@]}"})
 
 if [[ ${#ALL_HDD[@]} -gt 0 ]]; then
   case "$HDD_BACKEND" in

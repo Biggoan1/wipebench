@@ -207,11 +207,14 @@ record_evidence() {
   done < <(grep '^WBEV|' "$LOG_FILE" 2>/dev/null || true)
   # keep the full transcript too - the CSV is the index, this is the detail
   cp "$LOG_FILE" "$mnt/Evidence/${hs:-unknown}_$(date -u +%Y%m%d-%H%M%S).log" 2>/dev/null || true
-  # nwipe (the outside image's overwrite backend) leaves a per-drive log + PDF certificate
-  if [ -d /tmp/wipebench-nwipe ] && [ -n "$(ls -A /tmp/wipebench-nwipe 2>/dev/null)" ]; then
-    mkdir -p "$mnt/Evidence/nwipe/${hs:-unknown}" 2>/dev/null || true
-    cp /tmp/wipebench-nwipe/* "$mnt/Evidence/nwipe/${hs:-unknown}/" 2>/dev/null || true
-  fi
+  # nwipe (the outside image's overwrite backend) leaves a per-drive log + PDF certificate,
+  # and the ATA Secure Erase path leaves a per-drive hdparm transcript - keep both
+  for evdir in nwipe ata; do
+    if [ -d "/tmp/wipebench-$evdir" ] && [ -n "$(ls -A "/tmp/wipebench-$evdir" 2>/dev/null)" ]; then
+      mkdir -p "$mnt/Evidence/$evdir/${hs:-unknown}" 2>/dev/null || true
+      cp "/tmp/wipebench-$evdir"/* "$mnt/Evidence/$evdir/${hs:-unknown}/" 2>/dev/null || true
+    fi
+  done
   sync 2>/dev/null || true
   umount "$mnt" 2>/dev/null || true
   rmdir  "$mnt" 2>/dev/null || true
