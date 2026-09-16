@@ -193,7 +193,7 @@ record_evidence() {
   mkdir -p "$mnt/Evidence" 2>/dev/null || true
   csv="$mnt/Evidence/wipe-log.csv"
   if [ ! -f "$csv" ]; then
-    echo "timestamp_utc,host_vendor,host_model,host_serial,device,drive_model,drive_serial,size_bytes,technique,killdisk_method,standard,result" > "$csv" 2>/dev/null || true
+    echo "timestamp_utc,host_vendor,host_model,host_serial,device,drive_model,drive_serial,size_bytes,technique,method,standard,result" > "$csv" 2>/dev/null || true
   fi
   hv=$(cat /sys/class/dmi/id/sys_vendor    2>/dev/null | tr -d ',' | xargs || true)
   hm=$(cat /sys/class/dmi/id/product_name  2>/dev/null | tr -d ',' | xargs || true)
@@ -207,6 +207,11 @@ record_evidence() {
   done < <(grep '^WBEV|' "$LOG_FILE" 2>/dev/null || true)
   # keep the full transcript too - the CSV is the index, this is the detail
   cp "$LOG_FILE" "$mnt/Evidence/${hs:-unknown}_$(date -u +%Y%m%d-%H%M%S).log" 2>/dev/null || true
+  # nwipe (the outside image's overwrite backend) leaves a per-drive log + PDF certificate
+  if [ -d /tmp/wipebench-nwipe ] && [ -n "$(ls -A /tmp/wipebench-nwipe 2>/dev/null)" ]; then
+    mkdir -p "$mnt/Evidence/nwipe/${hs:-unknown}" 2>/dev/null || true
+    cp /tmp/wipebench-nwipe/* "$mnt/Evidence/nwipe/${hs:-unknown}/" 2>/dev/null || true
+  fi
   sync 2>/dev/null || true
   umount "$mnt" 2>/dev/null || true
   rmdir  "$mnt" 2>/dev/null || true

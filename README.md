@@ -126,6 +126,26 @@ Takes roughly 18 minutes for a full ~260 GB stick. It stamps a JSON build manife
 `WIPEBENCH_USB.lock` on partitions 1 and 3 (build date, pack count, catalog version, tool age)
 so a stick in the field can be told apart from an old one.
 
+### Two Linux images: standard and `outside`
+
+The image set can carry more than one Linux partition image. `wipebench-image.json` is the
+standard one; `wipebench-image.outside.json` describes `linux-part.img.outside`, built for
+sticks that leave the organisation:
+
+| | standard | outside |
+|---|---|---|
+| Dell BIOS password clear (`bios_clear.sh`) | yes | **removed** - the recipient's Dells do not carry our password |
+| HDD / SATA overwrite | Active@ KillDisk (licensed to one company; batch mode) | **nwipe** 0.38 (GPL) - `zero` method, verify last pass, per-drive log + PDF certificate |
+| NVMe | `nvme sanitize` / `format` | same |
+| root home, browser cache, build downloads | present | cleaned |
+
+`wipe_mixed.sh` is the SAME script on both: it uses KillDisk when the binary is present and nwipe
+otherwise (`--hdd-backend` overrides). Build with the console's "Linux image" picker or
+`.\tools\Build-WipeBenchUSB.ps1 -DiskNumber <n> -ImageRoot C:\WipeBenchImages -Variant outside`;
+reflash only the Linux partition of an existing stick with `Restore-WipeBenchLinux.ps1 -Variant outside`.
+The KillDisk freeware edition was considered and rejected for outside sticks: its EULA limits it to
+non-commercial use, the One Pass Zeros method, and **no batch mode**, which is the whole point.
+
 ### 4. Changing only the wipe engine
 
 The wipe engine lives inside `linux-part.img`, so editing `linux/` in this repo changes nothing

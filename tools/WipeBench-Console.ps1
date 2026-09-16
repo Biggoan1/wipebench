@@ -383,12 +383,31 @@ $btnBrowse = New-Object Windows.Forms.Button
 $btnBrowse.Text = "Browse..."; $btnBrowse.Location = '750,194'; $btnBrowse.Width = 90
 $btnBrowse.Add_Click({
     $fb = New-Object Windows.Forms.FolderBrowserDialog
-    if ($fb.ShowDialog() -eq 'OK') { $txtImage.Text = $fb.SelectedPath; Update-ImageInfo }
+    if ($fb.ShowDialog() -eq 'OK') { $txtImage.Text = $fb.SelectedPath; Update-ImageInfo; Update-Variants }
 })
 
 $lblImageInfo = New-Object Windows.Forms.Label
-$lblImageInfo.Location = '120,224'; $lblImageInfo.Size = New-Object Drawing.Size(720, 34)
+$lblImageInfo.Location = '120,224'; $lblImageInfo.Size = New-Object Drawing.Size(500, 34)
 $lblImageInfo.ForeColor = [Drawing.Color]::DimGray
+
+# Image VARIANT: one image set can hold several Linux images (wipebench-image.<variant>.json),
+# e.g. "outside" = no BIOS scripts, no KillDisk, nwipe instead - for sticks that leave the org.
+$lblVariant = New-Object Windows.Forms.Label
+$lblVariant.Text = "Linux image:"; $lblVariant.Location = '630,227'; $lblVariant.AutoSize = $true
+$cmbVariant = New-Object Windows.Forms.ComboBox
+$cmbVariant.Location = '715,224'; $cmbVariant.Width = 125; $cmbVariant.DropDownStyle = 'DropDownList'
+function Update-Variants {
+    $cmbVariant.Items.Clear()
+    if (-not [string]::IsNullOrWhiteSpace($txtImage.Text) -and (Test-Path $txtImage.Text)) {
+        Get-ChildItem $txtImage.Text -Filter 'wipebench-image*.json' -File -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.Name -eq 'wipebench-image.json') { [void]$cmbVariant.Items.Add('standard') }
+            elseif ($_.Name -match '^wipebench-image\.(.+)\.json$') { [void]$cmbVariant.Items.Add($Matches[1]) }
+        }
+    }
+    if ($cmbVariant.Items.Count -eq 0) { [void]$cmbVariant.Items.Add('standard') }
+    $cmbVariant.SelectedIndex = 0
+}
+Update-Variants
 
 function Update-ImageInfo {
     if ([string]::IsNullOrWhiteSpace($txtImage.Text)) { $lblImageInfo.Text = "Set an image-set folder (Browse...)."; return }
@@ -441,11 +460,12 @@ $btnBuild.Add_Click({
     if ($chkSkipPayload.Checked) { $a['SkipPayload'] = [switch]::Present }
     if ($chkSkipDrivers.Checked) { $a['SkipDrivers'] = [switch]::Present }
     if ($chkIncludeCustom.Checked) { $a['IncludeCustom'] = [switch]::Present }
+    if ($cmbVariant.SelectedItem -and $cmbVariant.SelectedItem -ne 'standard') { $a['Variant'] = [string]$cmbVariant.SelectedItem }
     $script:onDone = { Update-Disks }
-    Start-Tool -ToolName "Build-WipeBenchUSB.ps1" -ToolArgs $a -What "Build stick on disk $($d.Number)"
+    Start-Tool -ToolName "Build-WipeBenchUSB.ps1" -ToolArgs $a -What "Build stick on disk $($d.Number)$(if ($a.Variant) { " ($($a.Variant) image)" })"
 })
 
-$tabBuild.Controls.AddRange(@($lblDisks, $diskGrid, $lblImage, $txtImage, $btnBrowse, $lblImageInfo,
+$tabBuild.Controls.AddRange(@($lblDisks, $diskGrid, $lblImage, $txtImage, $btnBrowse, $lblImageInfo, $lblVariant, $cmbVariant,
         $chkSkipPayload, $chkSkipDrivers, $chkIncludeCustom, $chkIncludePayload, $btnRefreshDisks, $btnCapture, $btnBuild))
 
 # ============================================================== DRIVERS tab ==

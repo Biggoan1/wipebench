@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# wipe_mixed.sh — Secure erase NVMe via nvme-cli sanitize/format and HDD/SATA via KillDisk
+# wipe_mixed.sh — Secure erase NVMe via nvme-cli sanitize/format and HDD/SATA via an
+# overwrite backend: KillDisk (the licensed tool on CE sticks) or nwipe (GPL, on the
+# "outside" image). The backend is chosen at run time from what is installed.
 # Destroys data. Use only in an isolated lab environment.
 
 set -euo pipefail
@@ -14,6 +16,13 @@ KILLDISK_BIN="${KILLDISK_BIN:-/opt/lsoft/KillDisk/KillDisk}"    # Path to KillDi
 # says the number is something else, change it HERE and everything follows.
 NIST_METHOD="${NIST_METHOD:-18}"                                # NIST 800-88 Rev 1
 KILLDISK_METHOD="${KILLDISK_METHOD:-$NIST_METHOD}"              # override with --killdisk-method
+# HDD backend. auto = KillDisk if its binary is present, else nwipe. The outside image has no
+# KillDisk at all (it is licensed to one company), so it lands on nwipe without any flag.
+HDD_BACKEND="${HDD_BACKEND:-auto}"                              # auto|killdisk|nwipe
+NWIPE_BIN="${NWIPE_BIN:-nwipe}"
+NWIPE_METHOD="${NWIPE_METHOD:-zero}"                            # one-pass zeros = NIST 800-88 Clear
+NWIPE_VERIFY="${NWIPE_VERIFY:-last}"                            # off|last|all
+NWIPE_REPORT_DIR="${NWIPE_REPORT_DIR:-/tmp/wipebench-nwipe}"    # per-drive log + PDF certificate; auto_wipe.sh copies these to Evidence/
 POLL_INTERVAL="${POLL_INTERVAL:-10}"                            # seconds between sanitize-log polls
 TIMEOUT_SEC="${TIMEOUT_SEC:-7200}"                              # 2 hours
 RUN=0
@@ -26,7 +35,9 @@ usage() {
   cat <<EOF
 Usage: sudo $0 [--run] [--yes] [--include-root] [--exclude-usb|--include-usb]
                [--nvme-method auto|crypto|block|format]
-               [--killdisk-bin /path/KillDisk] [--killdisk-method N] [--debug]
+               [--hdd-backend auto|killdisk|nwipe]
+               [--killdisk-bin /path/KillDisk] [--killdisk-method N]
+               [--nwipe-method zero|one|random|dodshort|dod|gutmann] [--nwipe-verify off|last|all] [--debug]
 EOF
 }
 
@@ -41,6 +52,9 @@ while [[ $# -gt 0 ]]; do
     --nvme-method) NVME_METHOD="$2"; shift 2;;
     --killdisk-bin) KILLDISK_BIN="$2"; shift 2;;
     --killdisk-method) KILLDISK_METHOD="$2"; shift 2;;
+    --hdd-backend) HDD_BACKEND="$2"; shift 2;;
+    --nwipe-method) NWIPE_METHOD="$2"; shift 2;;
+    --nwipe-verify) NWIPE_VERIFY="$2"; shift 2;;
     --debug) DEBUG=1; shift;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown arg: $1"; usage; exit 1;;
@@ -55,10 +69,22 @@ fi
 for cmd in lsblk; do
   command -v "$cmd" >/dev/null || { echo "$cmd not found"; exit 1; }
 done
-# nvme-cli is optional — warn but continue (will fall back to KillDisk for those devices)
+
+# Pick the overwrite backend for non-NVMe disks (and for NVMe drives that fail sanitize).
+case "$HDD_BACKEND" in
+  auto)
+    if [[ -x "$KILLDISK_BIN" ]]; then HDD_BACKEND=killdisk
+    elif command -v "$NWIPE_BIN" >/dev/null 2>&1; then HDD_BACKEND=nwipe
+    else HDD_BACKEND=none; fi;;
+  killdisk) [[ -x "$KILLDISK_BIN" ]] || { echo "KillDisk binary not found at '$KILLDISK_BIN'. Set --killdisk-bin." >&2; exit 1; };;
+  nwipe)    command -v "$NWIPE_BIN" >/dev/null 2>&1 || { echo "nwipe not found ('$NWIPE_BIN')." >&2; exit 1; };;
+  *) echo "Unknown --hdd-backend '$HDD_BACKEND' (auto|killdisk|nwipe)" >&2; exit 1;;
+esac
+
+# nvme-cli is optional — warn but continue (those devices go to the HDD backend instead)
 if ! command -v nvme >/dev/null 2>&1; then
-  echo "WARNING: nvme-cli not found — NVMe sanitize unavailable, will fall back to KillDisk"
-  NVME_METHOD="killdisk"
+  echo "WARNING: nvme-cli not found — NVMe sanitize unavailable, NVMe drives go to the $HDD_BACKEND overwrite"
+  NVME_METHOD="fallback"
 fi
 
 # Optional discovery table
@@ -116,7 +142,7 @@ declare -A NVME_CTRLS_SEEN=()
 NVME_CTRLS=()
 NVME_NAMESPACES=()
 SATA_LIKE=()
-KILLDISK_FALLBACK=()
+HDD_FALLBACK=()          # NVMe drives that could not be sanitized and get overwritten instead
 
 for d in "${ALL_DISKS[@]}"; do
   # Skip USB disks if requested
@@ -161,9 +187,14 @@ fi
 echo "Plan (dry-run=$((1-RUN))):"
 echo "- Excluded disks: $excluded_disks $suffix"
 echo "- NVMe controllers to sanitize (from detection): ${NVME_NAMESPACES[*]}"
-echo "- Non-NVMe disks for KillDisk: ${SATA_LIKE[*]:-none}"
-echo "- NVMe method: $NVME_METHOD; KillDisk method: $KILLDISK_METHOD ($NIST_METHOD=NIST 800-88 Rev 1, 3=DoD 5220.22-M)"
-echo "- NVMe drives that fail sanitize fall back to KillDisk method $NIST_METHOD"
+echo "- Non-NVMe disks for the $HDD_BACKEND overwrite: ${SATA_LIKE[*]:-none}"
+case "$HDD_BACKEND" in
+  killdisk) echo "- NVMe method: $NVME_METHOD; KillDisk method: $KILLDISK_METHOD ($NIST_METHOD=NIST 800-88 Rev 1, 3=DoD 5220.22-M)"
+            echo "- NVMe drives that fail sanitize fall back to KillDisk method $NIST_METHOD";;
+  nwipe)    echo "- NVMe method: $NVME_METHOD; nwipe method: $NWIPE_METHOD, verify=$NWIPE_VERIFY (a one-pass overwrite = NIST 800-88 Clear)"
+            echo "- NVMe drives that fail sanitize fall back to the same nwipe overwrite";;
+  none)     echo "- WARNING: no overwrite backend installed (neither KillDisk nor nwipe) - non-NVMe disks CANNOT be erased";;
+esac
 
 if [[ $RUN -eq 0 ]]; then
   echo "Dry-run only. Re-run with --run to execute."
@@ -268,35 +299,31 @@ sd_to_index() {
   echo "$idx"
 }
 
-# Process NVMe namespaces — attempt nvme sanitize, fall back to KillDisk NIST 800-88 Rev 1
+# Process NVMe namespaces — attempt nvme sanitize, fall back to the overwrite backend
 
 for ns in "${NVME_NAMESPACES[@]}"; do
   echo "Processing NVMe namespace /dev/$ns ..."
-  if [[ "$NVME_METHOD" == "killdisk" ]]; then
-    echo "nvme-cli unavailable — routing /dev/$ns to KillDisk fallback"
-    KILLDISK_FALLBACK+=("$ns")
+  if [[ "$NVME_METHOD" == "fallback" ]]; then
+    echo "nvme-cli unavailable — routing /dev/$ns to the $HDD_BACKEND overwrite"
+    HDD_FALLBACK+=("$ns")
   elif erase_nvme_ctrl "$ns"; then
     echo "NVMe erase succeeded on /dev/$ns"
     wbev "$ns" "${NVME_LAST_ACTION:-nvme sanitize}" "-" "${NVME_LAST_STD:-NIST 800-88 Purge}" "success"
   else
-    echo "NVMe erase failed on /dev/$ns — falling back to KillDisk (NIST 800-88 Rev 1)"
-    KILLDISK_FALLBACK+=("$ns")
+    echo "NVMe erase failed on /dev/$ns — falling back to the $HDD_BACKEND overwrite"
+    HDD_FALLBACK+=("$ns")
   fi
 done
 
-# Process SATA-like disks via KillDisk
-# Also process any NVMe drives that fell back (nvme-cli failed or unavailable)
-ALL_KILLDISK=(${SATA_LIKE[@]+"${SATA_LIKE[@]}"} ${KILLDISK_FALLBACK[@]+"${KILLDISK_FALLBACK[@]}"})
+# ---- overwrite backends -------------------------------------------------------
+# Everything non-NVMe, plus any NVMe drive that fell back. Both backends emit the same
+# WBEV evidence line, and an overwrite is a CLEAR under 800-88 whatever the method number.
 
-if [[ ${#ALL_KILLDISK[@]} -gt 0 ]]; then
-  if ! command -v "$KILLDISK_BIN" >/dev/null 2>&1; then
-    echo "KillDisk binary not found at '$KILLDISK_BIN'. Set --killdisk-bin to correct path." >&2
-    exit 1
-  fi
-
-  for d in "${ALL_KILLDISK[@]}"; do
+erase_hdd_killdisk() {
+  local d idx kd_rc effective_method
+  for d in "${ALL_HDD[@]}"; do
     # NVMe fallback devices use NIST 800-88 Rev 1 regardless of --killdisk-method
-    if [[ " ${KILLDISK_FALLBACK[*]} " == *" $d "* ]]; then
+    if [[ " ${HDD_FALLBACK[*]} " == *" $d "* ]]; then
       # deliberately forces NIST even if --killdisk-method asked for something else
       effective_method="$NIST_METHOD"
       echo "Running KillDisk on /dev/$d (NVMe fallback, forcing NIST 800-88 Rev 1, method $effective_method) ..."
@@ -316,7 +343,6 @@ if [[ ${#ALL_KILLDISK[@]} -gt 0 ]]; then
       echo "Skipping '$d' for KillDisk (no index or path mapping)."
       continue
     fi
-    # An overwrite is a CLEAR under 800-88 regardless of the method number.
     if (( kd_rc == 0 )); then
       wbev "$d" "KillDisk overwrite" "$effective_method" "NIST 800-88 Clear" "success"
     else
@@ -325,8 +351,52 @@ if [[ ${#ALL_KILLDISK[@]} -gt 0 ]]; then
       exit "$kd_rc"      # same outcome set -e gave before, but now it is recorded first
     fi
   done
+}
+
+erase_hdd_nwipe() {
+  # nwipe 0.38 (Debian trixie). One process per drive, all started together, so a two-disk
+  # machine finishes in the time of its slowest disk. --nogui requires --autonuke; with a
+  # device named on the command line autonuke wipes ONLY that device. --noblank because the
+  # zero method already leaves the disk blank. Each drive gets its own log and PDF
+  # certificate in NWIPE_REPORT_DIR; auto_wipe.sh copies that folder to Evidence/.
+  local d rc worst=0 usbflag=()
+  (( EXCLUDE_USB )) && usbflag=(--nousb)
+  mkdir -p "$NWIPE_REPORT_DIR"
+  declare -A pids=()
+  for d in "${ALL_HDD[@]}"; do
+    echo "Running nwipe on /dev/$d (method $NWIPE_METHOD, verify $NWIPE_VERIFY) ..."
+    "$NWIPE_BIN" --autonuke --nogui --nosignals --noblank --rounds=1 "${usbflag[@]}" \
+      --method="$NWIPE_METHOD" --verify="$NWIPE_VERIFY" \
+      --logfile="$NWIPE_REPORT_DIR/nwipe-$d.log" --PDFreportpath="$NWIPE_REPORT_DIR" "/dev/$d" &
+    pids["$d"]=$!
+  done
+  for d in "${ALL_HDD[@]}"; do
+    rc=0; wait "${pids[$d]}" || rc=$?
+    if (( rc == 0 )); then
+      echo "nwipe completed on /dev/$d"
+      wbev "$d" "nwipe overwrite (verify=$NWIPE_VERIFY)" "$NWIPE_METHOD" "NIST 800-88 Clear" "success"
+    else
+      wbev "$d" "nwipe overwrite (verify=$NWIPE_VERIFY)" "$NWIPE_METHOD" "NIST 800-88 Clear" "FAILED(rc=$rc)"
+      echo "nwipe FAILED on /dev/$d (exit $rc) - see $NWIPE_REPORT_DIR/nwipe-$d.log" >&2
+      worst=$rc
+    fi
+  done
+  (( worst == 0 )) || exit "$worst"
+}
+
+ALL_HDD=(${SATA_LIKE[@]+"${SATA_LIKE[@]}"} ${HDD_FALLBACK[@]+"${HDD_FALLBACK[@]}"})
+
+if [[ ${#ALL_HDD[@]} -gt 0 ]]; then
+  case "$HDD_BACKEND" in
+    killdisk) erase_hdd_killdisk;;
+    nwipe)    erase_hdd_nwipe;;
+    none)
+      for d in "${ALL_HDD[@]}"; do wbev "$d" "none" "-" "-" "FAILED(no overwrite backend installed)"; done
+      echo "ERROR: ${#ALL_HDD[@]} disk(s) could not be erased - neither KillDisk nor nwipe is installed." >&2
+      exit 1;;
+  esac
 else
-  echo "No non-NVMe disks detected for KillDisk."
+  echo "No non-NVMe disks detected for the overwrite backend."
 fi
 
 echo "All operations submitted."

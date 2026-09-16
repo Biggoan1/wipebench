@@ -41,6 +41,7 @@ param(
     [switch]$SkipDrivers,
     [switch]$IncludeCustom,                  # personal extras - off by default (see below)
     [string]$CustomFolder = "CustomJohn",
+    [string]$Variant = "",                   # e.g. "outside": reads wipebench-image.outside.json (a second Linux image, same winpe/payload)
     [switch]$AllowInternalDisk,
     [switch]$Force
 )
@@ -55,13 +56,14 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 
 # ---------- manifest ----------
-$manifestPath = Join-Path $ImageRoot "wipebench-image.json"
-if (-not (Test-Path $manifestPath)) { throw "No wipebench-image.json in $ImageRoot - run Capture-WipeBenchImage.ps1 first." }
+$manifestName = if ($Variant) { "wipebench-image.$Variant.json" } else { "wipebench-image.json" }
+$manifestPath = Join-Path $ImageRoot $manifestName
+if (-not (Test-Path $manifestPath)) { throw "No $manifestName in $ImageRoot - run Capture-WipeBenchImage.ps1 first." }
 $mf = Get-Content $manifestPath -Raw | ConvertFrom-Json
 $linuxImg = Join-Path $ImageRoot $mf.linux_image
 if (-not (Test-Path $linuxImg)) { throw "Linux image '$($mf.linux_image)' missing from $ImageRoot." }
 $linuxBytes = [int64]$mf.linux_part_bytes
-Say "Image set: version $($mf.version), captured $($mf.captured_utc) from $($mf.captured_from)" Gray
+Say "Image set: version $($mf.version), captured $($mf.captured_utc) from $($mf.captured_from)$(if ($Variant) { " - VARIANT '$Variant'" })" Gray
 
 # ---------- target selection ----------
 if ($DiskNumber -lt 0) {
@@ -223,6 +225,7 @@ function Write-StickManifest {
             partition       = $Partition
             built_utc       = (Get-Date).ToUniversalTime().ToString('s') + 'Z'
             built_by        = "$env:USERNAME@$env:COMPUTERNAME"
+            variant         = $(if ($Variant) { $Variant } else { 'standard' })
             image_version   = $mf.version
             image_captured  = $mf.captured_utc
             tools_newest    = $toolTime

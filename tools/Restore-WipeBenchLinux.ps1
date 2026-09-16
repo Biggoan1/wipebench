@@ -29,6 +29,7 @@ param(
     [Parameter(Mandatory)][int]$DiskNumber,
     [string]$ImageRoot = "C:\WipeBenchImages",
     [switch]$SkipVerify,
+    [string]$Variant = "",          # e.g. "outside": flashes the Linux image named in wipebench-image.outside.json
     # check the partition against the image WITHOUT writing anything
     [switch]$VerifyOnly,
     [switch]$Force
@@ -41,8 +42,9 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     throw "Raw disk writes need an elevated session."
 }
 
-$manifestPath = Join-Path $ImageRoot "wipebench-image.json"
-if (-not (Test-Path $manifestPath)) { throw "No wipebench-image.json in $ImageRoot." }
+$manifestName = if ($Variant) { "wipebench-image.$Variant.json" } else { "wipebench-image.json" }
+$manifestPath = Join-Path $ImageRoot $manifestName
+if (-not (Test-Path $manifestPath)) { throw "No $manifestName in $ImageRoot." }
 $mf = Get-Content $manifestPath -Raw | ConvertFrom-Json
 $linuxImg = Join-Path $ImageRoot $mf.linux_image
 if (-not (Test-Path $linuxImg)) { throw "Linux image '$($mf.linux_image)' missing from $ImageRoot." }
