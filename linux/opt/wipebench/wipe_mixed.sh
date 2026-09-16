@@ -429,15 +429,20 @@ erase_hdd_nwipe() {
   # device named on the command line autonuke wipes ONLY that device. --noblank because the
   # zero method already leaves the disk blank. Each drive gets its own log and PDF
   # certificate in NWIPE_REPORT_DIR; auto_wipe.sh copies that folder to Evidence/.
+  # NOT --nosignals: it masks SIGUSR1 too, which is how the progress ticker asks nwipe for
+  # its percent/ETA (verified 2026-09-16). It bought nothing here anyway - a Ctrl-C in the
+  # kiosk terminal kills auto_wipe.sh itself. nwipe dumps its whole log to stdout at exit in
+  # --nogui mode; that goes to a .console file beside the log so the screen shows only ours.
   local d rc worst=0 usbflag=()
   (( EXCLUDE_USB )) && usbflag=(--nousb)
   mkdir -p "$NWIPE_REPORT_DIR"
   declare -A pids=()
   for d in "${ALL_HDD[@]}"; do
     echo "Running nwipe on /dev/$d (method $NWIPE_METHOD, verify $NWIPE_VERIFY) ..."
-    "$NWIPE_BIN" --autonuke --nogui --nosignals --noblank --rounds=1 "${usbflag[@]}" \
+    "$NWIPE_BIN" --autonuke --nogui --noblank --rounds=1 "${usbflag[@]}" \
       --method="$NWIPE_METHOD" --verify="$NWIPE_VERIFY" \
-      --logfile="$NWIPE_REPORT_DIR/nwipe-$d.log" --PDFreportpath="$NWIPE_REPORT_DIR" "/dev/$d" &
+      --logfile="$NWIPE_REPORT_DIR/nwipe-$d.log" --PDFreportpath="$NWIPE_REPORT_DIR" "/dev/$d" \
+      >"$NWIPE_REPORT_DIR/nwipe-$d.console" 2>&1 &
     pids["$d"]=$!
     TICK_PIDS["$d"]=$!; TICK_LOG["$d"]="$NWIPE_REPORT_DIR/nwipe-$d.log"
   done
@@ -478,7 +483,9 @@ progress_ticker() {
         before=$(wc -l < "$log" 2>/dev/null || echo 0)
         kill -USR1 "$pid" 2>/dev/null || true
         sleep 1
-        stat=$(tail -n +"$(( before + 1 ))" "$log" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1 | sed -E 's/^\[[^]]*\][[:space:]]*//; s/^[a-z]+:[[:space:]]*//' || true)
+        # nwipe's line: "[ts]    info: /dev/sda: 25.39%, round 1 of 1, pass 1 of 1, eta 00:12:34, [syncing]"
+        stat=$(tail -n +"$(( before + 1 ))" "$log" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1 \
+               | sed -E 's/^\[[^]]*\][[:space:]]*//; s/^[a-z]+:[[:space:]]*//; s#^/dev/[^:]+:[[:space:]]*##' || true)
         printf '[%s] %-8s %s\n' "$(date +%H:%M:%S)" "$d" "${stat:-nwipe running, $(( el / 60 )) min elapsed}"
       else
         printf '[%s] %-8s ATA Secure Erase running, %d min elapsed (drive estimated %s min)\n' \
