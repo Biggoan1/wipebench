@@ -405,7 +405,11 @@ function Update-Variants {
         }
     }
     if ($cmbVariant.Items.Count -eq 0) { [void]$cmbVariant.Items.Add('standard') }
-    $cmbVariant.SelectedIndex = 0
+    # Default to the OUTSIDE image when the set has one (John, 2026-09-16): most sticks built
+    # here now go to other people, and a stick that leaves with the standard image carries the
+    # licensed KillDisk and the BIOS-password scripts. Pick "standard" deliberately for our own.
+    $i = $cmbVariant.Items.IndexOf('outside')
+    $cmbVariant.SelectedIndex = $(if ($i -ge 0) { $i } else { 0 })
 }
 Update-Variants
 

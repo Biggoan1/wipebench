@@ -140,7 +140,7 @@ sticks that leave the organisation:
 | root home, browser cache, build downloads | present | cleaned |
 
 `wipe_mixed.sh` is the SAME script on both: it uses KillDisk when the binary is present and nwipe
-otherwise (`--hdd-backend` overrides). Build with the console's "Linux image" picker or
+otherwise (`--hdd-backend` overrides). The console's "Linux image" picker **defaults to `outside` when the image set has one** - choose `standard` deliberately for in-house sticks. Build with the picker or
 `.\tools\Build-WipeBenchUSB.ps1 -DiskNumber <n> -ImageRoot C:\WipeBenchImages -Variant outside`;
 reflash only the Linux partition of an existing stick with `Restore-WipeBenchLinux.ps1 -Variant outside`.
 The KillDisk freeware edition was considered and rejected for outside sticks: its EULA limits it to
