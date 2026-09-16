@@ -301,6 +301,9 @@ if (-not $SkipPayload) {
         if (Test-Path $src) { Copy-Item $src $toolsDst -Force }
     }
     Say "  $((Get-ChildItem $toolsDst -File).Count) files -> $toolsDst (open Start-WipeBenchConsole.cmd)" Green
+    # the recipient-facing how-to sits at the ROOT of the data partition where a person will see it
+    $howto = Join-Path (Split-Path $PSScriptRoot -Parent) 'HOW-TO-WipeBench.md'
+    if (Test-Path $howto) { Copy-Item $howto "${payLetter}:\HOW-TO-WipeBench.md" -Force; Say "  HOW-TO-WipeBench.md -> ${payLetter}:\" Green }
 } else { Say "  -SkipPayload: tools not copied" Yellow }
 
 # ---------- 5. verify ----------
