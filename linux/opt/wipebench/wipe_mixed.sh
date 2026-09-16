@@ -102,8 +102,10 @@ if (( INCLUDE_ROOT == 0 )); then
   root_src=$(findmnt -no SOURCE / || true)
   if [[ -n "$root_src" && "$root_src" != "overlay" && "$root_src" != "tmpfs" ]]; then
     root_base=$(basename "$root_src")
-    root_parent=$(lsblk -no PKNAME "/dev/$root_base" 2>/dev/null || echo "$root_base")
-    EXCL["$root_parent"]=1
+    root_parent=$(lsblk -no PKNAME "/dev/$root_base" 2>/dev/null | head -1 || true)
+    [[ -n "$root_parent" ]] || root_parent="$root_base"
+    # (an LVM/dm root reports no parent; an empty subscript would abort the script under set -u)
+    [[ -n "$root_parent" ]] && EXCL["$root_parent"]=1
   fi
 fi
 
@@ -113,8 +115,9 @@ for mp in /cdrom /isodevice /lib/live/mount/medium /run/casper /run/mnt/medium; 
     src=$(findmnt -no SOURCE "$mp" || true)
     [[ -z "$src" ]] && continue
     base=$(basename "$src")
-    parent=$(lsblk -no PKNAME "/dev/$base" 2>/dev/null || echo "$base")
-    EXCL["$parent"]=1
+    parent=$(lsblk -no PKNAME "/dev/$base" 2>/dev/null | head -1 || true)
+    [[ -n "$parent" ]] || parent="$base"
+    [[ -n "$parent" ]] && EXCL["$parent"]=1
   fi
 done
 
